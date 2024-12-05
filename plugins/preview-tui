@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# +(...) syntax is extended pattern matching operator supported by bash only, so should add extglob
+shopt -s extglob
+
 # Description: Terminal based file previewer
 #
 # Note: This plugin needs a "NNN_FIFO" to work. See man.
