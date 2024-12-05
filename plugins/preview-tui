@@ -191,7 +191,7 @@ start_preview() {
             kitty @ goto-layout splits
             # Trying to use kitty's integrated window management as the split window.
             kitty @ launch --no-response --title "preview-tui" --keep-focus \
-                --cwd "$PWD" "${ENVVARS[@]}" --location "${NNN_SPLIT}split" "$0" "$1" ;;
+                --cwd current "${ENVVARS[@]}" --location "${NNN_SPLIT}split" "$0" "$1" ;;
         wezterm)
             export "${ENVVARS[@]}"
             if [ "$NNN_SPLIT" = "v" ]; then split="--horizontal"; else split="--bottom"; fi
@@ -450,7 +450,7 @@ image_preview() {
     if [ "$NNN_TERMINAL" = "kitty" ] && [[ "$NNN_PREVIEWIMGPROG" == +(|icat) ]]; then
         kitty +kitten icat --silent --scale-up --place "$1"x"$2"@0x0 --transfer-mode=stream --stdin=no "$3" &
     elif [ "$NNN_TERMINAL" = "tmux" ] && [[ -n "$KITTY_LISTEN_ON" ]] && [[ "$NNN_PREVIEWIMGPROG" == +(|icat) ]]; then
-        kitty +kitten icat --silent --scale-up --place "$(($1 - 1))x$(($2 - 1))"@0x0 --transfer-mode=memory --stdin=no "$3" &
+        kitty +kitten icat --silent --scale-up --place "$1"x"$2"@0x0 --transfer-mode=stream --stdin=no "$3" &
     elif [ "$NNN_TERMINAL" = "wezterm" ] && [[ "$NNN_PREVIEWIMGPROG" == +(|imgcat) ]]; then
         wezterm imgcat "$3" &
     elif exists ueberzug && [[ "$NNN_PREVIEWIMGPROG" == +(|ueberzug) ]]; then
