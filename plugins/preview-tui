@@ -420,7 +420,7 @@ generate_preview() {
                  else
                     image_preview "$1" "$2" "$3" && return
                  fi ;;
-            image) if exists rsvg-convert && [[ "${3##*.}" == "svg" ]]; then
+            image|pdf) if exists rsvg-convert && [[ "${3##*.}" == "svg" ]]; then
                        rsvg-convert -a -w "$NNN_PREVIEWWIDTH" -h "$NNN_PREVIEWHEIGHT" -f png -o "$NNN_PREVIEWDIR/$3.png" "$3"
                    elif exists convert; then
                        convert "$3" -flatten -resize "$NNN_PREVIEWWIDTH"x"$NNN_PREVIEWHEIGHT"\> "$NNN_PREVIEWDIR/$3.jpg"
