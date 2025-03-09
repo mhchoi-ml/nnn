@@ -449,7 +449,7 @@ image_preview() {
     exec >/dev/tty
     if [ "$NNN_TERMINAL" = "kitty" ] && [[ "$NNN_PREVIEWIMGPROG" == +(|icat) ]]; then
         kitty +kitten icat --silent --scale-up --place "$1"x"$2"@0x0 --transfer-mode=stream --stdin=no "$3" &
-    elif [ "$NNN_TERMINAL" = "tmux" ] && [[ -n "$KITTY_LISTEN_ON" ]] && [[ "$NNN_PREVIEWIMGPROG" == +(|icat) ]]; then
+    elif [ "$NNN_TERMINAL" = "tmux" ] && [[ "$NNN_PREVIEWIMGPROG" == +(|icat) ]]; then
         kitty +kitten icat --silent --scale-up --place "$1"x"$2"@0x0 --transfer-mode=stream --stdin=no "$3" &
     elif [ "$NNN_TERMINAL" = "wezterm" ] && [[ "$NNN_PREVIEWIMGPROG" == +(|imgcat) ]]; then
         wezterm imgcat "$3" &
