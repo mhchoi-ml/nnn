@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2014-2016, Lazaros Koromilas <lostd@2f30.org>
  * Copyright (C) 2014-2016, Dimitris Papastamos <sin@2f30.org>
- * Copyright (C) 2016-2024, Arun Prakash Jana <engineerarun@gmail.com>
+ * Copyright (C) 2016-2025, Arun Prakash Jana <engineerarun@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -100,6 +100,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stddef.h>
+#include <wctype.h>
 #include <stdalign.h>
 #ifndef __USE_XOPEN_EXTENDED
 #define __USE_XOPEN_EXTENDED 1
@@ -179,6 +180,7 @@
 #define MAX(x, y)       ((x) > (y) ? (x) : (y))
 #define ISODD(x)        ((x) & 1)
 #define ISBLANK(x)      ((x) == ' ' || (x) == '\t')
+#define ISSPACE(x)      (ISBLANK(x) || (x) == '\n' || (x) == '\r' || (x) == '\f' || (x) == '\v')
 #define TOUPPER(ch)     (((ch) >= 'a' && (ch) <= 'z') ? ((ch) - 'a' + 'A') : (ch))
 #define TOLOWER(ch)     (((ch) >= 'A' && (ch) <= 'Z') ? ((ch) - 'A' + 'a') : (ch))
 #define ISUPPER_(ch)    ((ch) >= 'A' && (ch) <= 'Z')
@@ -392,12 +394,11 @@ typedef struct {
 	uint_t selbm      : 1;  /* Select a bookmark from bookmarks directory */
 	uint_t selmode    : 1;  /* Set when selecting files */
 	uint_t stayonsel  : 1;  /* Disable auto-advance on selection */
-	uint_t trash      : 2;  /* Trash method 0: rm -rf, 1: trash-cli, 2: gio trash */
 	uint_t uidgid     : 1;  /* Show owner and group info */
 	uint_t usebsdtar  : 1;  /* Use bsdtar as default archive utility */
 	uint_t xprompt    : 1;  /* Use native prompt instead of readline prompt */
 	uint_t showlines  : 1;  /* Show line numbers */
-	uint_t reserved   : 3;  /* Adjust when adding/removing a field */
+	uint_t reserved   : 5;  /* Adjust when adding/removing a field */
 } runstate;
 
 /* Contexts or workspaces */
@@ -437,6 +438,7 @@ static int nselected;
 #ifndef NOFIFO
 static int fifofd = -1;
 #endif
+static int devnullfd = -1;
 static time_t gtimesecs;
 static uint_t idletimeout, selbufpos, selbuflen;
 static ushort_t xlines, xcols;
@@ -462,6 +464,7 @@ static char *listroot;
 static char *plgpath;
 static char *pnamebuf, *pselbuf, *findselpos;
 static char *mark;
+static char *trashcmd;
 #ifndef NOX11
 static char hostname[_POSIX_HOST_NAME_MAX + 1];
 #endif
@@ -709,8 +712,8 @@ static const char * const messages[] = {
 #define NNN_SEL     9
 #define NNN_ARCHIVE 10
 #define NNN_ORDER   11
-#define NNN_HELP    12 /* strings end here */
-#define NNN_TRASH   13 /* flags begin here */
+#define NNN_HELP    12
+#define NNN_TRASH   13
 
 static const char * const env_cfg[] = {
 	"NNN_OPTS",
@@ -986,7 +989,8 @@ static size_t xstrsncpy(char *restrict dst, const char *restrict src, size_t n)
 	char *end = memccpy(dst, src, '\0', n);
 
 	if (!end) {
-		dst[n - 1] = '\0'; // NOLINT
+		if (n)
+			dst[n - 1] = '\0';
 		end = dst + n; /* If we return n here, binary size increases due to auto-inlining */
 	}
 
@@ -1332,21 +1336,23 @@ static char *bmtarget(const char *filepath, char *cwd, char *buf)
 }
 
 /* wraps the argument in single quotes so it can be safely fed to shell */
-static bool shell_escape(char *output, size_t outlen, const char *s)
+static ssize_t shell_escape(char *output, size_t outlen, const char *s)
 {
 	size_t n = xstrlen(s), w = 0;
 
-	if (s == output) {
-		DPRINTF_S("s == output");
-		return FALSE;
+	if (s == output || outlen < 3) {
+		errno = EINVAL;
+		return -1;
 	}
 
 	output[w++] = '\''; /* begin single quote */
 	for (size_t r = 0; r < n; ++r) {
 		/* potentially too big: 4 for the single quote case, 2 from
 		 * outside the loop */
-		if (w + 6 >= outlen)
-			return FALSE;
+		if (w + 6 >= outlen) {
+			errno = ENAMETOOLONG;
+			return -1;
+		}
 
 		switch (s[r]) {
 		/* the only thing that has special meaning inside single
@@ -1363,8 +1369,8 @@ static bool shell_escape(char *output, size_t outlen, const char *s)
 		}
 	}
 	output[w++] = '\''; /* end single quote */
-	output[w++] = '\0'; /* nul terminator */
-	return TRUE;
+	output[w]   = '\0'; /* nul terminator */
+	return w;
 }
 
 static bool set_tilde_in_path(char *path)
@@ -2329,7 +2335,7 @@ static char *parseargs(char *cmd, char **argv, int *pindex)
 {
 	int count = 0;
 	size_t len = xstrlen(cmd) + 1;
-	char *line = (char *)malloc(len);
+	char *line = malloc(len);
 
 	if (!line) {
 		DPRINTF_S("malloc()!");
@@ -2482,13 +2488,10 @@ static int spawn(char *file, char *arg1, char *arg2, char *arg3, ushort_t flag)
 	if (pid == 0) {
 		/* Suppress stdout and stderr */
 		if (flag & F_NOTRACE) {
-			int fd = open("/dev/null", O_WRONLY, 0200);
-
 			if (flag & F_NOSTDIN)
-				dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO); // NOLINT
-			dup2(fd, STDERR_FILENO);
-			close(fd);
+				dup2(devnullfd, STDIN_FILENO);
+			dup2(devnullfd, STDOUT_FILENO);
+			dup2(devnullfd, STDERR_FILENO);
 		} else if (flag & F_TTY) {
 			/* If stdout has been redirected to a non-tty, force output to tty */
 			if (!isatty(STDOUT_FILENO)) {
@@ -2525,17 +2528,6 @@ static char *xgetenv(const char * const name, char *fallback)
 	char *value = getenv(name);
 
 	return value && value[0] ? value : fallback;
-}
-
-/* Checks if an env variable is set to 1 */
-static inline uint_t xgetenv_val(const char *name)
-{
-	char *str = getenv(name);
-
-	if (str && str[0])
-		return atoi(str);
-
-	return 0;
 }
 
 /* Check if a dir exists, IS a dir, and is readable */
@@ -2579,7 +2571,7 @@ static bool rmmulstr(char *buf, bool use_trash)
 			 r, selpath);
 	else
 		snprintf(buf, CMD_LEN_MAX, "xargs -0 %s < %s",
-			 utils[(g_state.trash == 1) ? UTIL_TRASH_CLI : UTIL_GIO_TRASH], selpath);
+			 trashcmd, selpath);
 
 	return TRUE;
 }
@@ -2597,8 +2589,7 @@ static bool xrm(char * const fpath, bool use_trash)
 		rm_opts[3] = r;
 		spawn("rm", rm_opts, "--", fpath, F_NORMAL | F_CHKRTN);
 	} else
-		spawn(utils[(g_state.trash == 1) ? UTIL_TRASH_CLI : UTIL_GIO_TRASH],
-		      fpath, NULL, NULL, F_NORMAL | F_MULTI);
+		spawn(trashcmd, fpath, NULL, NULL, F_NORMAL | F_MULTI);
 
 	return (access(fpath, F_OK) == -1); /* File is removed */
 }
@@ -2723,7 +2714,7 @@ static bool cpmvrm_selection(enum action sel, char *path)
 		}
 		break;
 	default: /* SEL_TRASH, SEL_RM_ONLY */
-		if (!rmmulstr(g_buf, g_state.trash && sel == SEL_TRASH)) {
+		if (!rmmulstr(g_buf, trashcmd && sel == SEL_TRASH)) {
 			printmsg(messages[MSG_CANCEL]);
 			return FALSE;
 		}
@@ -2850,7 +2841,7 @@ static void archive_selection(const char *cmd, const char *archive)
 
 static void write_lastdir(const char *curpath, const char *outfile)
 {
-	bool tilde = false;
+	bool tilde = false, ok = false;
 	if (!outfile)
 		xstrsncpy(cfgpath + xstrlen(cfgpath), "/.lastd", 8);
 	else
@@ -2859,15 +2850,14 @@ static void write_lastdir(const char *curpath, const char *outfile)
 	int fd = open(outfile
 			? (tilde ? g_buf : outfile)
 			: cfgpath, O_CREAT | O_WRONLY | O_TRUNC, S_IWUSR | S_IRUSR);
-
-	if (fd != -1 && shell_escape(g_buf, sizeof(g_buf), curpath)) {
-		if (write(fd, "cd ", 3) == 3) {
-			if (write(fd, g_buf, strlen(g_buf)) != (ssize_t)strlen(g_buf)) {
-				DPRINTF_S("write failed!");
-			}
-		}
+	if (fd >= 0) {
+		memcpy(g_buf, "cd ", 3);  // NOLINT
+		ssize_t l = shell_escape(g_buf + 3, sizeof(g_buf) - 3, curpath);
+		ok = l >= 0 && write(fd, g_buf, l + 3) == l + 3;
 		close(fd);
 	}
+	if (!ok)
+		errexit();
 }
 
 /*
@@ -3637,7 +3627,7 @@ static void addcmdtohist(char *cmd)
 /* Show a prompt with input string and return the changes */
 static char *xreadline(const char *prefill, const char *prompt)
 {
-	size_t len, pos;
+	size_t len, pos, lpos;
 	int x, r;
 	const int WCHAR_T_WIDTH = sizeof(wchar_t);
 	wint_t ch[1];
@@ -3716,13 +3706,13 @@ static char *xreadline(const char *prefill, const char *prompt)
 				continue;
 			case CONTROL('W'):
 				printmsg(prompt);
-				do {
-					if (pos == 0)
-						break;
-					memmove(buf + pos - 1, buf + pos,
-						(len - pos) * WCHAR_T_WIDTH);
-					--pos, --len;
-				} while (buf[pos - 1] != ' ' && buf[pos - 1] != '/'); // NOLINT
+				lpos = pos;
+				while (pos > 0 && ISSPACE(buf[pos-1]))
+					--pos;
+				while (pos > 0 && !ISSPACE(buf[pos-1]))
+					--pos;
+				memmove(buf + pos, buf + lpos, (len - lpos) * WCHAR_T_WIDTH);
+				len -= lpos - pos;
 				continue;
 			case CONTROL('K'):
 				printmsg(prompt);
@@ -3745,8 +3735,42 @@ static char *xreadline(const char *prefill, const char *prompt)
 				pos = 0;
 				continue;
 			case ESC: /* Exit prompt on Esc, but just filter out Alt+key */
-				if (handle_alt_key(ch) != ERR)
+				if (handle_alt_key(ch) != ERR) {
+					switch (*ch) {
+					case 'd':
+						printmsg(prompt);
+						lpos = pos;
+						while (pos < len && !iswalnum(buf[pos + 1]))
+							++pos;
+						while (pos < len && iswalnum(buf[++pos]));
+						memmove(buf + lpos, buf + pos, (len - pos) * WCHAR_T_WIDTH);
+						len -= pos - lpos;
+						pos = lpos;
+						continue;
+					case KEY_BACKSPACE:
+						printmsg(prompt);
+						lpos = pos;
+						while (pos > 0 && !iswalnum(buf[pos - 1]))
+							--pos;
+						while (pos > 0 && iswalnum(buf[pos - 1]))
+							--pos;
+						memmove(buf + pos, buf + lpos, (len - lpos) * WCHAR_T_WIDTH);
+						len -= lpos - pos;
+						continue;
+					case 'f':
+						while (pos < len && !iswalnum(buf[pos + 1]))
+							++pos;
+						while (pos < len && iswalnum(buf[++pos]));
+						continue;
+					case 'b':
+						while (pos > 0 && !iswalnum(buf[pos - 1]))
+							--pos;
+						while (pos > 0 && iswalnum(buf[pos - 1]))
+							--pos;
+						continue;
+					}
 					continue;
+				}
 
 				len = 0;
 				goto END;
@@ -4357,7 +4381,7 @@ static void printent(int pdents_index, uint_t namecols, bool sel)
 	}
 
 	if (sel)
-		attrs |= A_REVERSE;
+		attrs |= A_REVERSE | A_BOLD;
 	if (attrs)
 		attron(attrs);
 	if (!ind)
@@ -4385,6 +4409,7 @@ static void setcfg(settings newcfg)
 	/* Synchronize the global function pointers to match the new cfg. */
 	entrycmpfn = cfg.reverse ? &reventrycmp : &entrycmp;
 	namecmpfn = cfg.version ? &xstrverscasecmp : &xstricmp;
+	filterfn = cfg.regex ? &visible_re : &visible_str;
 }
 
 static void savecurctx(char *path, char *curname, int nextctx)
@@ -4542,8 +4567,10 @@ static bool load_session(const char *sname, char **path, char **lastdir, char **
 	*path = g_ctx[cfg.curctx].c_path;
 	*lastdir = g_ctx[cfg.curctx].c_last;
 	*lastname = g_ctx[cfg.curctx].c_name;
-	set_sort_flags('\0'); /* Set correct sort options */
-	xstrsncpy(curssn, sname, NAME_MAX);
+	/* Set correct sort and filter options */
+	set_sort_flags('\0');
+	filterfn = cfg.regex ? &visible_re : &visible_str;
+	xstrsncpy(curssn, sname ? sname : "@", NAME_MAX);
 	status = TRUE;
 
 END:
@@ -7757,7 +7784,7 @@ nochange:
 					tmp = (listpath && xstrcmp(path, listpath) == 0)
 					      ? listroot : path;
 					mkpath(tmp, pdents[cur].name, newpath);
-					if (!xrm(newpath, g_state.trash && sel == SEL_TRASH))
+					if (!xrm(newpath, trashcmd && sel == SEL_TRASH))
 						continue;
 
 					xrmfromsel(tmp, newpath);
@@ -8537,8 +8564,8 @@ static bool setup_config(void)
 	if (!xdg)
 		len = xstrlen(home) + xstrlen("/.config/nnn/bookmarks") + 1;
 
-	cfgpath = (char *)malloc(len);
-	plgpath = (char *)malloc(len);
+	cfgpath = malloc(len);
+	plgpath = malloc(len);
 	if (!cfgpath || !plgpath) {
 		xerror();
 		return FALSE;
@@ -8576,7 +8603,7 @@ static bool setup_config(void)
 		char *env_sel = xgetenv(env_cfg[NNN_SEL], NULL);
 
 		selpath = env_sel ? xstrdup(env_sel)
-				  : (char *)malloc(len + 3); /* Length of "/.config/nnn/.selection" */
+				  : malloc(len + 3); /* Length of "/.config/nnn/.selection" */
 
 		if (!selpath) {
 			xerror();
@@ -8759,6 +8786,11 @@ int main(int argc, char *argv[])
 
 				close(fd);
 				selpath = abspath(optarg, NULL, NULL);
+				if (!selpath) {
+					xerror();
+					return EXIT_FAILURE;
+				}
+
 				unlink(selpath);
 			}
 			break;
@@ -8827,6 +8859,12 @@ int main(int argc, char *argv[])
 	enabledbg();
 	DPRINTF_S(VERSION);
 #endif
+
+	devnullfd = open("/dev/null", O_RDWR | O_CLOEXEC);
+	if (devnullfd < 0) {
+		xerror();
+		return EXIT_FAILURE;
+	}
 
 	/* Prefix for temporary files */
 	if (!set_tmp_path())
@@ -9040,9 +9078,13 @@ int main(int argc, char *argv[])
 #endif
 
 	/* Configure trash preference */
-	opt = xgetenv_val(env_cfg[NNN_TRASH]);
-	if (opt && opt <= 2)
-		g_state.trash = opt;
+	trashcmd = getenv(env_cfg[NNN_TRASH]);
+	if (trashcmd) {
+		if (strcmp(trashcmd, "1") == 0)
+			trashcmd = utils[UTIL_TRASH_CLI];
+		else if (strcmp(trashcmd, "2") == 0)
+			trashcmd = utils[UTIL_GIO_TRASH];
+	}
 
 	/* Ignore/handle certain signals */
 	struct sigaction act = {.sa_handler = sigint_handler};
