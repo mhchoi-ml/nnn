@@ -305,7 +305,7 @@ handle_ext() {
         md) if exists glow; then
                 fifo_pager glow -s dark "$1"
             elif exists lowdown; then
-                fifo_pager lowdown -Tterm "$1"
+                fifo_pager lowdown -Tterm --term-width="$cols" --term-column="$cols" "$1"
             else
                 fifo_pager pager "$1"
             fi ;;
@@ -325,6 +325,12 @@ handle_ext() {
                 fifo_pager atool -l "$1"
             elif exists bsdtar; then
                 fifo_pager bsdtar -tvf "$1"
+            fi ;;
+        json)
+            if exists jq; then
+                fifo_pager jq --color-output '.' "$1"
+            else
+                fifo_pager pager "$1"
             fi ;;
         *) if [ "$3" = "bin" ]; then
                fifo_pager print_bin_info "$1"
@@ -456,7 +462,7 @@ image_preview() {
     elif exists ueberzug && [[ "$NNN_PREVIEWIMGPROG" == +(|ueberzug) ]]; then
         ueberzug_layer "$1" "$2" "$3" && return
     elif exists "${NNN_PREVIEWIMGPROG%% *}"; then # can include command flags; only check first word
-        "$NNN_PREVIEWIMGPROG" "$3" &
+        $NNN_PREVIEWIMGPROG "$3" &
     else
         fifo_pager print_bin_info "$3" && return
     fi
